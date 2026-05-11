@@ -33,17 +33,22 @@ enviados a un buzón compartido de Outlook/Microsoft 365** para usarlos como con
                           │ p.ej. agente-soberania@empresa.com  │
                           │   (gratis, sin licencia adicional)  │
                           └──────────────┬──────────────────────┘
-                                         │ Office 365 Outlook trigger
+                                         │ Microsoft Graph API
+                                         │ (auth = Logic App MSI con Mail.ReadWrite
+                                         │  RESTRINGIDO al buzón vía
+                                         │  ApplicationAccessPolicy)
                                          ▼
                   ┌──────────────────────────────────────────────────┐
                   │  LOGIC APP CONSUMPTION  la-email-ingest-soberania │
                   │  ─────────────────────────────────────────────── │
-                  │  1. trigger: "When a new email arrives in        │
-                  │     shared mailbox"                              │
-                  │  2. compose: subject + body + headers → texto    │
-                  │  3. POST /files (multipart) → Foundry            │
-                  │  4. POST /vector_stores/{id}/files               │
-                  │  5. (opcional) PUT raw .eml → blob audit         │
+                  │  trigger: Recurrence cada 2 min                  │
+                  │  1. GET /users/{shared}/messages?isRead=false    │
+                  │  2. for each unread message:                     │
+                  │     a. compose: subject + body + headers → texto │
+                  │     b. POST /files (multipart) → Foundry         │
+                  │     c. POST /vector_stores/{id}/files            │
+                  │     d. PUT raw .txt → blob audit                 │
+                  │     e. PATCH message isRead=true                 │
                   └─────────────────────────┬────────────────────────┘
                                             │
                           ┌─────────────────┼─────────────────┐
@@ -52,7 +57,7 @@ enviados a un buzón compartido de Outlook/Microsoft 365** para usarlos como con
               ┌──────────────────┐  ┌────────────────┐  ┌────────────────┐
               │ Vector store     │  │ Agent          │  │ Blob container │
               │ vs-emails-       │◄─┤ agente-        │  │ emails-raw     │
-              │ soberania        │  │ soberania-     │  │ (.eml audit)   │
+              │ soberania        │  │ soberania-     │  │ (.txt audit)   │
               │ (chunks + idx)   │  │ digital-eu     │  └────────────────┘
               └──────────────────┘  │ model:         │
                                     │ gpt-4.1-mini   │
@@ -63,6 +68,12 @@ enviados a un buzón compartido de Outlook/Microsoft 365** para usarlos como con
                                              ▼
                     Foundry Playground / app cliente / Teams bot / etc.
 ```
+
+> 🔒 **Nota de seguridad**: la Logic App MSI tiene Graph `Mail.ReadWrite`
+> (Application). El permiso por defecto sería sobre TODO el tenant. Está
+> **explícitamente restringido** al buzón compartido vía una
+> `ApplicationAccessPolicy` de Exchange Online (creada por `post-deploy.ps1`).
+> Verificable con `Test-ApplicationAccessPolicy`.
 
 ---
 
@@ -77,8 +88,9 @@ enviados a un buzón compartido de Outlook/Microsoft 365** para usarlos como con
 | Agent | `agente-soberania-digital-eu` (id `asst_WtKGwogw9Bqks1zytvocU4yY`) | Foundry Agent Service agent | — | — |
 | Storage account | `saagentic01` | `Microsoft.Storage/storageAccounts` | `rg-agentic-dev-eu` | `eastus` |
 | Blob container | `emails-raw` | container (audit `.eml`) | `saagentic01` | — |
-| Logic App | `la-email-ingest-soberania` (a desplegar) | `Microsoft.Logic/workflows` | `rg-agentic-dev-eu` | `eastus` |
-| Shared mailbox | `agente-soberania-digital@<tu-tenant>.onmicrosoft.com` (a crear manualmente) | Exchange Online | — | — |
+| Logic App | `la-email-ingest-soberania` | `Microsoft.Logic/workflows` | `rg-agentic-dev-eu` | `eastus` |
+| Shared mailbox | `agente-soberania-digital@MngEnvMCAP184496.onmicrosoft.com` | Exchange Online (creado) | — | — |
+| Scope security group | `sg-agente-soberania-scope@MngEnvMCAP184496.onmicrosoft.com` | mail-enabled SG (para ApplicationAccessPolicy) | — | — |
 
 **Project endpoint:** `https://ms-foundry-dev-eu-01.services.ai.azure.com/api/projects/agentic01`
 
@@ -196,22 +208,51 @@ pip install -r scripts/requirements.txt
 python scripts/create_agent.py
 ```
 
-### Paso 6 · Buzón compartido (manual)
-Sigue [`docs/SHARED_MAILBOX.md`](docs/SHARED_MAILBOX.md).
+### Paso 6 · Buzón compartido
+
+**Opción A — automática (recomendada, requiere Exchange Admin / Global Admin)**:
+```powershell
+.\scripts\create-shared-mailbox.ps1 `
+  -MailboxAlias agente-soberania-digital `
+  -DisplayName "Agente Soberania Digital" `
+  -TenantDomain MngEnvMCAP184496.onmicrosoft.com `
+  -GrantAccessTo admin@MngEnvMCAP184496.onmicrosoft.com
+```
+
+**Opción B — manual desde el portal**: ver [`docs/SHARED_MAILBOX.md`](docs/SHARED_MAILBOX.md).
 
 ### Paso 7 · Logic App
 ```powershell
 az deployment group create -g rg-soberania-eu `
   --template-file infra/logic-app.bicep `
   --parameters logicAppName=la-email-ingest-soberania `
-               sharedMailbox=agente-soberania@<tudominio> `
+               sharedMailboxUpn=agente-soberania-digital@<tudominio> `
                foundryProjectEndpoint=https://my-foundry-eu-01.services.ai.azure.com/api/projects/soberania `
                vectorStoreId=<vs_id> `
                storageAccountName=stsoberaniaeu01
 ```
 
-Tras desplegar, abre la Logic App en el portal y autoriza la **API connection de Office
-365 Outlook** con un usuario que tenga permisos de lectura sobre el buzón compartido.
+### Paso 8 · Permisos para la Logic App MSI (Graph + Foundry + Storage + ApplicationAccessPolicy)
+
+```powershell
+.\scripts\post-deploy.ps1 `
+  -ResourceGroup rg-soberania-eu `
+  -LogicAppName la-email-ingest-soberania `
+  -SharedMailboxUpn agente-soberania-digital@<tudominio> `
+  -FoundryAccountName my-foundry-eu-01 `
+  -StorageAccountName stsoberaniaeu01
+```
+
+Este script:
+1. Concede a la MSI Graph `Mail.ReadWrite` (Application)
+2. La asigna `Azure AI User` + `Cognitive Services User` sobre el Foundry account
+3. La asigna `Storage Blob Data Contributor` sobre el storage
+4. Crea una mail-enabled security group `sg-agente-soberania-scope` con el shared mailbox
+5. Crea una `ApplicationAccessPolicy` que **restringe** la MSI a leer SOLO ese buzón
+6. Verifica con `Test-ApplicationAccessPolicy` que está `Granted` para el target
+   y `Denied` para el resto del tenant
+
+**Cero clicks. Cero OAuth interactivo.**
 
 ---
 
@@ -219,21 +260,25 @@ Tras desplegar, abre la Logic App en el portal y autoriza la **API connection de
 
 ```
 agente-soberania-digital-eu/
-├── README.md                     ← este archivo
+├── README.md                        ← este archivo
 ├── infra/
-│   └── logic-app.bicep           ← Logic App de ingesta de emails
+│   └── logic-app.bicep              ← Logic App (polling Graph + MSI auth)
 ├── scripts/
-│   ├── create_agent.py           ← crear/actualizar agente y vector store
-│   ├── test_agent.py             ← smoke test con email simulado
-│   ├── chat_agent.py             ← cliente CLI conversacional
+│   ├── create_agent.py              ← crear/actualizar agente y vector store
+│   ├── test_agent.py                ← smoke test con email simulado
+│   ├── chat_agent.py                ← cliente CLI conversacional
+│   ├── create-shared-mailbox.ps1    ← crear shared mailbox via PowerShell
+│   ├── post-deploy.ps1              ← RBAC + Graph perm + ApplicationAccessPolicy
 │   └── requirements.txt
 ├── docs/
-│   ├── SHARED_MAILBOX.md         ← cómo crear el buzón en M365
-│   ├── REST.md                   ← invocar el agente vía REST
-│   ├── PROMPT.md                 ← prompt del sistema (versionado)
+│   ├── SHARED_MAILBOX.md            ← cómo crear el buzón en M365 (manual)
+│   ├── SHARED_MAILBOX_AUTO.md       ← creación automática via script
+│   ├── REST.md                      ← invocar el agente vía REST
+│   ├── PROMPT.md                    ← prompt del sistema (versionado)
 │   └── TROUBLESHOOTING.md
 ├── samples/
-│   └── sample-email.txt          ← correo de ejemplo para tests
+│   └── sample-email.txt             ← correo de ejemplo para tests
+├── LICENSE
 └── .gitignore
 ```
 
