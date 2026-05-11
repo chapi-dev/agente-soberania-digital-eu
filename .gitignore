@@ -1,0 +1,10 @@
+__pycache__/
+*.pyc
+.venv/
+venv/
+.env
+agent-info.json
+sample-email.txt
+*.log
+.vscode/
+.idea/
