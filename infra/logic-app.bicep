@@ -99,11 +99,16 @@ resource logicApp 'Microsoft.Logic/workflows@2019-05-01' = {
           actions: {
             Compose_email_text: {
               type: 'Compose'
-              inputs: '@{concat(\'From: \', items(\'For_each_message\')?[\'from\']?[\'emailAddress\']?[\'address\'], \'\\nDate: \', items(\'For_each_message\')?[\'receivedDateTime\'], \'\\nSubject: \', items(\'For_each_message\')?[\'subject\'], \'\\n\\n\', items(\'For_each_message\')?[\'body\']?[\'content\'])}'
+              inputs: '@{concat(\'From: \', items(\'For_each_message\')?[\'from\']?[\'emailAddress\']?[\'address\'], \'\\nDate: \', items(\'For_each_message\')?[\'receivedDateTime\'], \'\\nSubject: \', items(\'For_each_message\')?[\'subject\'], \'\\n\\n\', items(\'For_each_message\')?[\'bodyPreview\'])}'
+            }
+            Build_multipart_body: {
+              type: 'Compose'
+              runAfter: { Compose_email_text: ['Succeeded'] }
+              inputs: '@{concat(\'------foundryboundary\', decodeUriComponent(\'%0D%0A\'), \'Content-Disposition: form-data; name="purpose"\', decodeUriComponent(\'%0D%0A%0D%0A\'), \'assistants\', decodeUriComponent(\'%0D%0A\'), \'------foundryboundary\', decodeUriComponent(\'%0D%0A\'), \'Content-Disposition: form-data; name="file"; filename="email-\', items(\'For_each_message\')?[\'id\'], \'.txt"\', decodeUriComponent(\'%0D%0A\'), \'Content-Type: text/plain\', decodeUriComponent(\'%0D%0A%0D%0A\'), outputs(\'Compose_email_text\'), decodeUriComponent(\'%0D%0A\'), \'------foundryboundary--\', decodeUriComponent(\'%0D%0A\'))}'
             }
             Upload_to_Foundry: {
               type: 'Http'
-              runAfter: { Compose_email_text: ['Succeeded'] }
+              runAfter: { Build_multipart_body: ['Succeeded'] }
               inputs: {
                 method: 'POST'
                 uri: '@{concat(parameters(\'foundryProjectEndpoint\'), \'/files?api-version=v1\')}'
@@ -114,7 +119,7 @@ resource logicApp 'Microsoft.Logic/workflows@2019-05-01' = {
                 headers: {
                   'Content-Type': 'multipart/form-data; boundary=----foundryboundary'
                 }
-                body: '@{concat(\'------foundryboundary\\r\\nContent-Disposition: form-data; name="purpose"\\r\\n\\r\\nassistants\\r\\n------foundryboundary\\r\\nContent-Disposition: form-data; name="file"; filename="email-\', items(\'For_each_message\')?[\'id\'], \'.txt"\\r\\nContent-Type: text/plain\\r\\n\\r\\n\', outputs(\'Compose_email_text\'), \'\\r\\n------foundryboundary--\\r\\n\')}'
+                body: '@outputs(\'Build_multipart_body\')'
               }
             }
             Attach_to_vector_store: {
