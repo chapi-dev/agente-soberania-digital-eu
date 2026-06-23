@@ -52,6 +52,19 @@ try {
   else { throw }
 }
 
+Write-Host "`n===== 1b) Graph Mail.Send (Application) =====" -ForegroundColor Cyan
+$mailSendRole = $graphSp.appRoles | Where-Object { $_.value -eq "Mail.Send" }
+$bodySend = @{ principalId = $msiObjectId; resourceId = $graphSpId; appRoleId = $mailSendRole.id } | ConvertTo-Json
+try {
+  Invoke-RestMethod -Method POST `
+    -Uri "https://graph.microsoft.com/v1.0/servicePrincipals/$msiObjectId/appRoleAssignments" `
+    -Headers @{Authorization="Bearer $token"; 'Content-Type'='application/json'} -Body $bodySend | Out-Null
+  Write-Host "[+] Mail.Send granted" -ForegroundColor Green
+} catch {
+  if ($_.ErrorDetails.Message -match 'already exists') { Write-Host "[=] Already granted" -ForegroundColor Yellow }
+  else { throw }
+}
+
 Write-Host "`n===== 2) Azure AI User on Foundry =====" -ForegroundColor Cyan
 az role assignment create --assignee-object-id $msiObjectId --assignee-principal-type ServicePrincipal `
   --role "Azure AI User" --scope $foundryId 2>&1 | Out-Null

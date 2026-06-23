@@ -77,6 +77,28 @@ Es una **acción manual obligatoria**. Tras desplegar el bicep:
   del vector store. Si tu correo no aparece ahí, el batch falló.
 - Logs del run en el portal Foundry → Agents → Runs.
 
+### La auto-respuesta no se envía al remitente
+
+La acción `Send_reply` usa Graph `/messages/{id}/reply`, que requiere **`Mail.Send`**
+(Application) en la MSI. Síntomas y comprobaciones:
+
+- **403 `ErrorAccessDenied` en `Send_reply`**: falta `Mail.Send`. Reejecuta
+  `post-deploy.ps1` (concede `Mail.ReadWrite` + `Mail.Send`) o añádelo a mano con
+  el `appRoleId` de `Mail.Send`:
+  ```powershell
+  az ad sp show --id 00000003-0000-0000-c000-000000000000 `
+    --query "appRoles[?value=='Mail.Send'].id | [0]" -o tsv
+  ```
+- **403 aunque `Mail.Send` está concedido**: la `ApplicationAccessPolicy` también
+  acota el envío; el buzón debe pertenecer al grupo de scope
+  (`sg-agente-soberania-scope`). Verifica con
+  `Test-ApplicationAccessPolicy -Identity <shared-mailbox-upn> -AppId <msi-appId>`.
+- **El run no termina (`Until_run_complete` agota PT5M)**: revisa el estado en
+  `Get_run_status`; si queda en `failed`, mira el error del run en Foundry →
+  Agents → Runs. El correo se marca como leído igualmente para evitar bucles.
+- **Responde con el texto de fallback** ("Gracias por su correo..."): el run no
+  produjo un mensaje `assistant` con texto (run `failed`/`expired`).
+
 ## Agente
 
 ### Las respuestas no citan correos aunque sí existen

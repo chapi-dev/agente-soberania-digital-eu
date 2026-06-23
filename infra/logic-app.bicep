@@ -7,11 +7,15 @@
 //   2. Para cada mensaje no leido:
 //      a. POST a Foundry /files (multipart) con el contenido del email
 //      b. POST a Foundry /vector_stores/{id}/files para adjuntarlo
-//      c. PATCH del mensaje a isRead=true
-//      d. (opcional) PUT del .txt a blob storage para auditoria
+//      c. (opcional) PUT del .txt a blob storage para auditoria
+//      d. Crea un thread, envia el email como pregunta y lanza un run del agente
+//      e. Hace polling del run hasta que termina y lee la respuesta del agente
+//      f. Responde automaticamente al remitente via Graph /messages/{id}/reply
+//      g. PATCH del mensaje a isRead=true
 //
 // Tras desplegar, la MSI necesita:
 //   - Mail.ReadWrite (Application) en Microsoft Graph
+//   - Mail.Send (Application) en Microsoft Graph (para auto-responder)
 //   - ApplicationAccessPolicy restringiendola al shared mailbox
 //   - Azure AI User en el Foundry account
 //   - Storage Blob Data Contributor en el storage account
@@ -41,6 +45,9 @@ param emailsContainerName string = 'emails-raw'
 @description('Frecuencia de polling en minutos')
 param pollIntervalMinutes int = 2
 
+@description('ID del agente Foundry (asst_xxx) que responde automaticamente a los correos')
+param agentId string = 'asst_WtKGwogw9Bqks1zytvocU4yY'
+
 resource logicApp 'Microsoft.Logic/workflows@2019-05-01' = {
   name: logicAppName
   location: location
@@ -55,6 +62,7 @@ resource logicApp 'Microsoft.Logic/workflows@2019-05-01' = {
       vectorStoreId: { value: vectorStoreId }
       storageAccountName: { value: storageAccountName }
       emailsContainerName: { value: emailsContainerName }
+      agentId: { value: agentId }
     }
     definition: {
       '$schema': 'https://schema.management.azure.com/providers/Microsoft.Logic/schemas/2016-06-01/workflowdefinition.json#'
@@ -65,6 +73,7 @@ resource logicApp 'Microsoft.Logic/workflows@2019-05-01' = {
         vectorStoreId: { type: 'String' }
         storageAccountName: { type: 'String' }
         emailsContainerName: { type: 'String' }
+        agentId: { type: 'String' }
       }
       triggers: {
         Recurrence: {
@@ -156,9 +165,179 @@ resource logicApp 'Microsoft.Logic/workflows@2019-05-01' = {
                 body: '@outputs(\'Compose_email_text\')'
               }
             }
+            Create_thread: {
+              type: 'Http'
+              runAfter: {
+                Save_audit_blob: ['Succeeded']
+              }
+              inputs: {
+                method: 'POST'
+                uri: '@{concat(parameters(\'foundryProjectEndpoint\'), \'/threads?api-version=v1\')}'
+                authentication: {
+                  type: 'ManagedServiceIdentity'
+                  audience: 'https://ai.azure.com'
+                }
+                headers: {
+                  'Content-Type': 'application/json'
+                }
+                body: {}
+              }
+            }
+            Compose_agent_prompt: {
+              type: 'Compose'
+              runAfter: {
+                Create_thread: ['Succeeded']
+              }
+              inputs: '@{concat(\'Eres el asistente del buzon de soberania digital de la UE. Redacta una respuesta profesional, clara y bien fundamentada al siguiente correo, en el mismo idioma del remitente, citando la normativa europea aplicable cuando proceda. Devuelve UNICAMENTE el cuerpo del correo de respuesta, sin asunto ni encabezados.\', decodeUriComponent(\'%0D%0A%0D%0A\'), \'--- CORREO RECIBIDO ---\', decodeUriComponent(\'%0D%0A\'), outputs(\'Compose_email_text\'))}'
+            }
+            Add_message: {
+              type: 'Http'
+              runAfter: {
+                Compose_agent_prompt: ['Succeeded']
+              }
+              inputs: {
+                method: 'POST'
+                uri: '@{concat(parameters(\'foundryProjectEndpoint\'), \'/threads/\', body(\'Create_thread\')?[\'id\'], \'/messages?api-version=v1\')}'
+                authentication: {
+                  type: 'ManagedServiceIdentity'
+                  audience: 'https://ai.azure.com'
+                }
+                headers: {
+                  'Content-Type': 'application/json'
+                }
+                body: {
+                  role: 'user'
+                  content: '@{outputs(\'Compose_agent_prompt\')}'
+                }
+              }
+            }
+            Create_run: {
+              type: 'Http'
+              runAfter: {
+                Add_message: ['Succeeded']
+              }
+              inputs: {
+                method: 'POST'
+                uri: '@{concat(parameters(\'foundryProjectEndpoint\'), \'/threads/\', body(\'Create_thread\')?[\'id\'], \'/runs?api-version=v1\')}'
+                authentication: {
+                  type: 'ManagedServiceIdentity'
+                  audience: 'https://ai.azure.com'
+                }
+                headers: {
+                  'Content-Type': 'application/json'
+                }
+                body: {
+                  assistant_id: '@{parameters(\'agentId\')}'
+                }
+              }
+            }
+            Until_run_complete: {
+              type: 'Until'
+              runAfter: {
+                Create_run: ['Succeeded']
+              }
+              expression: '@or(equals(body(\'Get_run_status\')?[\'status\'], \'completed\'), equals(body(\'Get_run_status\')?[\'status\'], \'failed\'), equals(body(\'Get_run_status\')?[\'status\'], \'cancelled\'), equals(body(\'Get_run_status\')?[\'status\'], \'expired\'))'
+              limit: {
+                count: 60
+                timeout: 'PT5M'
+              }
+              actions: {
+                Delay_poll: {
+                  type: 'Wait'
+                  inputs: {
+                    interval: {
+                      count: 3
+                      unit: 'Second'
+                    }
+                  }
+                }
+                Get_run_status: {
+                  type: 'Http'
+                  runAfter: {
+                    Delay_poll: ['Succeeded']
+                  }
+                  inputs: {
+                    method: 'GET'
+                    uri: '@{concat(parameters(\'foundryProjectEndpoint\'), \'/threads/\', body(\'Create_thread\')?[\'id\'], \'/runs/\', body(\'Create_run\')?[\'id\'], \'?api-version=v1\')}'
+                    authentication: {
+                      type: 'ManagedServiceIdentity'
+                      audience: 'https://ai.azure.com'
+                    }
+                  }
+                }
+              }
+            }
+            If_run_completed: {
+              type: 'If'
+              runAfter: {
+                Until_run_complete: ['Succeeded']
+              }
+              expression: {
+                and: [
+                  {
+                    equals: [
+                      '@body(\'Get_run_status\')?[\'status\']'
+                      'completed'
+                    ]
+                  }
+                ]
+              }
+              actions: {
+                Get_messages: {
+                  type: 'Http'
+                  inputs: {
+                    method: 'GET'
+                    uri: '@{concat(parameters(\'foundryProjectEndpoint\'), \'/threads/\', body(\'Create_thread\')?[\'id\'], \'/messages?api-version=v1\')}'
+                    authentication: {
+                      type: 'ManagedServiceIdentity'
+                      audience: 'https://ai.azure.com'
+                    }
+                  }
+                }
+                Filter_assistant: {
+                  type: 'Query'
+                  runAfter: {
+                    Get_messages: ['Succeeded']
+                  }
+                  inputs: {
+                    from: '@body(\'Get_messages\')?[\'data\']'
+                    where: '@equals(item()?[\'role\'], \'assistant\')'
+                  }
+                }
+                Compose_reply: {
+                  type: 'Compose'
+                  runAfter: {
+                    Filter_assistant: ['Succeeded']
+                  }
+                  inputs: '@{coalesce(first(body(\'Filter_assistant\'))?[\'content\']?[0]?[\'text\']?[\'value\'], \'Gracias por su correo. Lo hemos recibido y sera procesado por el equipo.\')}'
+                }
+                Send_reply: {
+                  type: 'Http'
+                  runAfter: {
+                    Compose_reply: ['Succeeded']
+                  }
+                  inputs: {
+                    method: 'POST'
+                    uri: '@{concat(\'https://graph.microsoft.com/v1.0/users/\', parameters(\'sharedMailboxUpn\'), \'/messages/\', items(\'For_each_message\')?[\'id\'], \'/reply\')}'
+                    authentication: {
+                      type: 'ManagedServiceIdentity'
+                      audience: 'https://graph.microsoft.com'
+                    }
+                    headers: {
+                      'Content-Type': 'application/json'
+                    }
+                    body: {
+                      comment: '@{outputs(\'Compose_reply\')}'
+                    }
+                  }
+                }
+              }
+            }
             Mark_as_read: {
               type: 'Http'
-              runAfter: { Save_audit_blob: ['Succeeded'] }
+              runAfter: {
+                If_run_completed: ['Succeeded', 'Failed', 'Skipped']
+              }
               inputs: {
                 method: 'PATCH'
                 uri: '@{concat(\'https://graph.microsoft.com/v1.0/users/\', parameters(\'sharedMailboxUpn\'), \'/messages/\', items(\'For_each_message\')?[\'id\'])}'

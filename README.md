@@ -48,7 +48,10 @@ enviados a un buzón compartido de Outlook/Microsoft 365** para usarlos como con
                   │     b. POST /files (multipart) → Foundry         │
                   │     c. POST /vector_stores/{id}/files            │
                   │     d. PUT raw .txt → blob audit                 │
-                  │     e. PATCH message isRead=true                 │
+                  │     e. POST /threads+msg+/runs → pregunta agente │
+                  │     f. poll run → lee la respuesta del agente    │
+                  │     g. POST /messages/{id}/reply → al remitente  │
+                  │     h. PATCH message isRead=true                 │
                   └─────────────────────────┬────────────────────────┘
                                             │
                           ┌─────────────────┼─────────────────┐
@@ -69,11 +72,11 @@ enviados a un buzón compartido de Outlook/Microsoft 365** para usarlos como con
                     Foundry Playground / app cliente / Teams bot / etc.
 ```
 
-> 🔒 **Nota de seguridad**: la Logic App MSI tiene Graph `Mail.ReadWrite`
-> (Application). El permiso por defecto sería sobre TODO el tenant. Está
-> **explícitamente restringido** al buzón compartido vía una
-> `ApplicationAccessPolicy` de Exchange Online (creada por `post-deploy.ps1`).
-> Verificable con `Test-ApplicationAccessPolicy`.
+> 🔒 **Nota de seguridad**: la Logic App MSI tiene Graph `Mail.ReadWrite` y
+> `Mail.Send` (Application). El permiso por defecto sería sobre TODO el tenant.
+> Está **explícitamente restringido** al buzón compartido vía una
+> `ApplicationAccessPolicy` de Exchange Online (creada por `post-deploy.ps1`),
+> que también acota el envío. Verificable con `Test-ApplicationAccessPolicy`.
 
 ---
 
@@ -108,6 +111,8 @@ Una vez la Logic App está activa, cada correo entrante:
 1. Queda guardado como `.eml` en el blob container `emails-raw` (auditoría)
 2. Se sube como archivo al vector store del agente
 3. El agente lo puede citar en respuestas posteriores
+4. El agente genera una respuesta y la Logic App **responde automáticamente
+   al remitente** (vía Graph `/reply` desde el buzón compartido)
 
 ### 2. Conversar con el agente
 
@@ -229,7 +234,8 @@ az deployment group create -g rg-soberania-eu `
                sharedMailboxUpn=agente-soberania-digital@<tudominio> `
                foundryProjectEndpoint=https://my-foundry-eu-01.services.ai.azure.com/api/projects/soberania `
                vectorStoreId=<vs_id> `
-               storageAccountName=stsoberaniaeu01
+               storageAccountName=stsoberaniaeu01 `
+               agentId=<asst_id>
 ```
 
 ### Paso 8 · Permisos para la Logic App MSI (Graph + Foundry + Storage + ApplicationAccessPolicy)
@@ -244,7 +250,7 @@ az deployment group create -g rg-soberania-eu `
 ```
 
 Este script:
-1. Concede a la MSI Graph `Mail.ReadWrite` (Application)
+1. Concede a la MSI Graph `Mail.ReadWrite` y `Mail.Send` (Application)
 2. La asigna `Azure AI User` + `Cognitive Services User` sobre el Foundry account
 3. La asigna `Storage Blob Data Contributor` sobre el storage
 4. Crea una mail-enabled security group `sg-agente-soberania-scope` con el shared mailbox
@@ -320,8 +326,9 @@ provisioned throughput o cambiar a `gpt-4o-mini` (similar precio) o `gpt-5-nano`
 
 ## Próximos pasos / mejoras
 
-- [ ] Añadir conector **Microsoft Graph** para que el agente pueda **responder**
-      directamente al remitente original
+- [x] ~~Añadir conector **Microsoft Graph** para que el agente pueda **responder**
+      directamente al remitente original~~ ✅ **implementado** — auto-respuesta vía
+      Graph `/messages/{id}/reply` con la MSI (`Mail.Send`)
 - [ ] Conectar **Azure AI Search** (`bbdd01`) con índice de jurisprudencia EUR-Lex
 - [ ] Añadir **Bing Grounding** tool para consultar últimas noticias regulatorias
 - [ ] Configurar **continuous evaluation** con dataset de preguntas-respuestas
